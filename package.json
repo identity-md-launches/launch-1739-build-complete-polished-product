@@ -1,0 +1,12 @@
+{
+  "name": "agentskill",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AgentSkill: discover Ethereum ERC-8004 agents by skill and existing reputation.",
+  "scripts": {
+    "start": "python3 scripts/serve.py",
+    "build": "python3 scripts/build_web.py",
+    "test": "node --test test/frontend/*.test.mjs"
+  }
+}
