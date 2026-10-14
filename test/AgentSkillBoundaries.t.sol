@@ -122,40 +122,122 @@ contract AgentSkillBoundariesTest is AgentSkillFixture {
         assertEq(app.skillAgentCount(SOLIDITY), 1);
     }
 
-    function test_hidingDoesNotFreeDistinctSkillCapacityButOldSkillsRemainReusable() public {
+    function test_capCountsActiveSkillsOnlyAndReactivationNeverDuplicatesCandidates() public {
+        bytes32[] memory skills = new bytes32[](32);
         for (uint256 i; i < 32; ++i) {
-            bytes32 skill = _register(1, string.concat("skill ", vm.toString(i)));
-            _hide(1, skill);
+            skills[i] = _register(1, string.concat("skill ", vm.toString(i)));
         }
-        assertEq(app.getAgentSkills(1).length, 0);
         vm.prank(alice);
         vm.expectRevert(AgentSkill.SkillLimitReached.selector);
         app.registerSkill(1, "new skill");
-        assertEq(app.skillAgentCount(keccak256("new skill")), 0);
-        _register(1, "SKILL 0");
-        assertEq(app.getAgentSkills(1).length, 1);
-        assertEq(app.skillAgentCount(keccak256("skill 0")), 1);
+        // Exactly one slot is released per hidden skill, whichever position it held.
+        _hide(1, skills[17]);
+        bytes32 fresh = _register(1, "new skill");
+        vm.prank(alice);
+        vm.expectRevert(AgentSkill.SkillLimitReached.selector);
+        app.registerSkill(1, "SKILL 17");
+        assertEq(app.getAgentSkills(1).length, 32);
+        assertEq(app.skillAgentCount(fresh), 1);
+        // Hiding everything leaves 32 free slots; old labels and new labels both fit again.
+        for (uint256 i; i < 32; ++i) {
+            if (i != 17) _hide(1, skills[i]);
+        }
+        _hide(1, fresh);
+        assertEq(app.getAgentSkills(1).length, 0);
+        for (uint256 i; i < 32; ++i) {
+            _register(1, string.concat("SKILL ", vm.toString(i)));
+        }
+        vm.prank(alice);
+        vm.expectRevert(AgentSkill.SkillLimitReached.selector);
+        app.registerSkill(1, "new skill");
+        assertEq(app.getAgentSkills(1).length, 32);
+        for (uint256 i; i < 32; ++i) {
+            assertEq(app.skillAgentCount(skills[i]), 1, "reactivation duplicated a candidate");
+        }
         (, uint256 total) = app.getSkills(0, 50);
-        assertEq(total, 32);
+        assertEq(total, 33);
     }
 
-    function test_hiddenMiddleSkillPreservesOriginalOrderOnReactivation() public {
+    function test_hidingSwapsTheLastSkillIntoTheGapAndReactivationAppends() public {
         _register(1, "writing");
         _register(1, "solidity");
         _register(1, "research");
+        bytes32 writing = keccak256("writing");
         _endorse(2, 1, SOLIDITY);
+        _endorse(2, 1, RESEARCH);
         _hide(1, SOLIDITY);
         AgentSkill.Skill[] memory skills = app.getAgentSkills(1);
         assertEq(skills.length, 2);
-        assertEq(skills[0].name, "writing");
-        assertEq(skills[1].name, "research");
+        assertEq(skills[0].id, writing);
+        assertEq(skills[1].id, RESEARCH);
+        assertEq(skills[1].endorsements, 1);
         _register(1, "solidity");
         skills = app.getAgentSkills(1);
         assertEq(skills.length, 3);
-        assertEq(skills[0].name, "writing");
+        assertEq(skills[0].id, writing);
+        assertEq(skills[1].id, RESEARCH);
+        assertEq(skills[2].id, SOLIDITY);
+        assertEq(skills[2].endorsements, 1);
+        // The moved skill's new position must be tracked: hiding it next must not corrupt the list.
+        _hide(1, RESEARCH);
+        skills = app.getAgentSkills(1);
+        assertEq(skills.length, 2);
+        assertEq(skills[0].id, writing);
         assertEq(skills[1].id, SOLIDITY);
-        assertEq(skills[1].endorsements, 1);
-        assertEq(skills[2].name, "research");
+        _hide(1, writing);
+        skills = app.getAgentSkills(1);
+        assertEq(skills.length, 1);
+        assertEq(skills[0].id, SOLIDITY);
+        assertEq(skills[0].endorsements, 1);
+        _hide(1, SOLIDITY);
+        assertEq(app.getAgentSkills(1).length, 0);
+        vm.prank(alice);
+        vm.expectRevert(AgentSkill.SkillNotActive.selector);
+        app.hideSkill(1, SOLIDITY);
+        // Endorsements of a hidden-then-reactivated skill still count and still reject the same voters.
+        _register(1, "research");
+        assertEq(app.getAgentSkills(1)[0].endorsements, 1);
+        vm.prank(bob);
+        vm.expectRevert(AgentSkill.DuplicateEndorsement.selector);
+        app.endorseSkill(2, 1, RESEARCH);
+    }
+
+    /// @dev Random hide/reactivate sequences keep the active list a permutation of the model's active set.
+    /// forge-config: default.fuzz.runs = 1000
+    function testFuzz_activeListIsAlwaysAPermutationOfTheActiveSet(uint8[24] memory steps) public {
+        bytes32[8] memory ids;
+        bool[8] memory active;
+        bool[8] memory known;
+        for (uint256 i; i < 8; ++i) {
+            ids[i] = keccak256(bytes(string.concat("skill ", vm.toString(i))));
+        }
+        for (uint256 s; s < steps.length; ++s) {
+            uint256 i = steps[s] % 8;
+            if (active[i]) {
+                _hide(1, ids[i]);
+            } else {
+                _register(1, string.concat("skill ", vm.toString(i)));
+                known[i] = true;
+            }
+            active[i] = !active[i];
+            AgentSkill.Skill[] memory listed = app.getAgentSkills(1);
+            uint256 expected;
+            for (uint256 k; k < 8; ++k) {
+                if (!active[k]) continue;
+                ++expected;
+                uint256 seen;
+                for (uint256 j; j < listed.length; ++j) {
+                    if (listed[j].id == ids[k]) ++seen;
+                }
+                assertEq(seen, 1, "active skill missing or duplicated");
+            }
+            assertEq(listed.length, expected, "hidden skill still listed");
+            for (uint256 k; k < 8; ++k) {
+                assertEq(
+                    app.skillAgentCount(ids[k]), known[k] ? 1 : 0, "candidate list changed by reactivation"
+                );
+            }
+        }
     }
 
     function test_maximumIdentityAndZeroIdentityDoNotCollide() public {

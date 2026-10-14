@@ -14,6 +14,7 @@ contract StatefulReputationSource {
         int128 value;
     }
     mapping(uint256 => Summary) internal summaries;
+    mapping(uint256 => bool) public failing;
 
     function getIdentityRegistry() external pure returns (address) {
         return 0x8004A169FB4a3325136EB29fA0ceB6D2e539a432;
@@ -23,11 +24,17 @@ contract StatefulReputationSource {
         summaries[id] = Summary(count, value);
     }
 
+    /// @dev A per-agent outage, like a history too long for the source gas budget.
+    function setFailing(uint256 id, bool value) external {
+        failing[id] = value;
+    }
+
     function getSummary(uint256 id, address[] calldata, string calldata, string calldata)
         external
         view
         returns (uint64, int128, uint8)
     {
+        require(!failing[id], "summary unavailable");
         Summary memory summary = summaries[id];
         return (summary.count, summary.value, 0);
     }
@@ -51,7 +58,9 @@ contract AgentSkillModelHandler is Test {
     mapping(uint256 => mapping(uint256 => uint256)) public votes;
     mapping(uint256 => mapping(uint256 => mapping(uint256 => bool))) public identityVote;
     mapping(uint256 => mapping(uint256 => mapping(uint256 => bool))) public walletVote;
+    /// @dev Active list mirror: swap-and-pop on hide, append on (re)activation, like the application.
     mapping(uint256 => uint256[]) internal agentOrder;
+    mapping(uint256 => mapping(uint256 => uint256)) internal position;
     mapping(uint256 => uint256[]) internal candidateOrder;
     uint256[] internal catalogOrder;
     bool[3] internal inCatalog;
@@ -59,6 +68,7 @@ contract AgentSkillModelHandler is Test {
     uint16[6] public rating;
     uint64[6] public completedWork;
     uint64[6] public acceptedWork;
+    bool[6] public unreadable;
     bool public useWork;
     uint64 public version = 1;
     uint256 public successfulRegistrations;
@@ -133,7 +143,25 @@ contract AgentSkillModelHandler is Test {
             abi.encodeCall(AgentSkill.hideSkill, (agentId(agent), skillId(skill))),
             expected
         );
-        if (expected.length == 0) active[agent][skill] = false;
+        if (expected.length != 0) return;
+        active[agent][skill] = false;
+        uint256[] storage order = agentOrder[agent];
+        uint256 last = order.length - 1;
+        uint256 at = position[agent][skill];
+        if (at != last) {
+            uint256 moved = order[last];
+            order[at] = moved;
+            position[agent][moved] = at;
+        }
+        order.pop();
+        position[agent][skill] = 0;
+    }
+
+    /// @dev Makes one agent's reputation summary unreadable (or readable again) without touching the app.
+    function outage(uint8 agentSeed, bool failing) external {
+        uint256 agent = bound(agentSeed, 0, AGENTS - 1);
+        unreadable[agent] = failing;
+        reputation.setFailing(agentId(agent), failing);
     }
 
     function endorse(uint8 voterSeed, uint8 targetSeed, uint8 skillSeed) external {
@@ -205,7 +233,6 @@ contract AgentSkillModelHandler is Test {
         assertEq(abi.decode(result, (bytes32)), skillId(skill));
         if (!known[agent][skill]) {
             known[agent][skill] = true;
-            agentOrder[agent].push(skill);
             candidateOrder[skill].push(agent);
             if (!inCatalog[skill]) {
                 inCatalog[skill] = true;
@@ -213,6 +240,8 @@ contract AgentSkillModelHandler is Test {
             }
         }
         active[agent][skill] = true;
+        position[agent][skill] = agentOrder[agent].length;
+        agentOrder[agent].push(skill);
         ++successfulRegistrations;
     }
 
@@ -275,7 +304,7 @@ contract AgentSkillStatefulTest is StdInvariant, Test {
         model = new AgentSkillModelHandler(
             app, MockIdentityRegistry(registry), StatefulReputationSource(reputation), new MockWorkHistory()
         );
-        bytes4[] memory selectors = new bytes4[](7);
+        bytes4[] memory selectors = new bytes4[](8);
         selectors[0] = AgentSkillModelHandler.register.selector;
         selectors[1] = AgentSkillModelHandler.hide.selector;
         selectors[2] = AgentSkillModelHandler.endorse.selector;
@@ -283,11 +312,13 @@ contract AgentSkillStatefulTest is StdInvariant, Test {
         selectors[4] = AgentSkillModelHandler.unauthorized.selector;
         selectors[5] = AgentSkillModelHandler.evidence.selector;
         selectors[6] = AgentSkillModelHandler.workMode.selector;
+        selectors[7] = AgentSkillModelHandler.outage.selector;
         targetContract(address(model));
         targetSelector(FuzzSelector({addr: address(model), selectors: selectors}));
     }
 
-    /// @notice Unique catalog/candidate membership and active lists equal the independently recorded actions.
+    /// @notice Unique catalog/candidate membership and active lists equal the independently recorded actions,
+    /// including the swap-and-pop order the application documents for hidden skills.
     function invariant_catalogAndSkillsMatchTheModel() public view {
         uint256[] memory catalog = model.catalog();
         (AgentSkill.Skill[] memory actualCatalog, uint256 total) = app.getSkills(0, 50);
@@ -302,17 +333,14 @@ contract AgentSkillStatefulTest is StdInvariant, Test {
         for (uint256 agent; agent < 6; ++agent) {
             AgentSkill.Skill[] memory actual = app.getAgentSkills(model.agentId(agent));
             uint256[] memory order = model.agentSkills(agent);
-            uint256 position;
+            assertEq(actual.length, order.length, "active skill count differs from the model");
             for (uint256 j; j < order.length; ++j) {
                 uint256 skill = order[j];
-                if (!model.active(agent, skill)) continue;
-                assertLt(position, actual.length, "active skill missing");
-                assertEq(actual[position].id, model.skillId(skill));
-                assertEq(actual[position].name, model.skillName(skill));
-                assertEq(actual[position].endorsements, model.votes(agent, skill));
-                ++position;
+                assertTrue(model.active(agent, skill), "model lists an inactive skill");
+                assertEq(actual[j].id, model.skillId(skill), "active skill order differs from the model");
+                assertEq(actual[j].name, model.skillName(skill));
+                assertEq(actual[j].endorsements, model.votes(agent, skill));
             }
-            assertEq(actual.length, position, "unexpected active skill");
         }
     }
 
@@ -358,13 +386,27 @@ contract AgentSkillStatefulTest is StdInvariant, Test {
             assertEq(total, model.candidates(skill).length);
             assertEq(next, total);
             uint256 activeCount;
+            uint256 unreadableCount;
             for (uint256 agent; agent < 6; ++agent) {
                 if (!model.active(agent, skill)) continue;
                 ++activeCount;
+                if (model.unreadable(agent)) ++unreadableCount;
                 uint256 occurrences;
                 for (uint256 i; i < ranked.length; ++i) {
                     if (ranked[i].agentId != model.agentId(agent)) continue;
                     ++occurrences;
+                    if (model.unreadable(agent)) {
+                        // Reported, never scored: no partial figure and an explicit source.
+                        assertTrue(ranked[i].unavailable, "unreadable agent was scored");
+                        assertEq(ranked[i].unavailableSource, address(app.REPUTATION_REGISTRY()));
+                        assertEq(keccak256(abi.encode(ranked[i].score)), keccak256(abi.encode(_empty())));
+                        assertGe(
+                            i, ranked.length - unreadableTail(ranked), "unreadable agent inside top list"
+                        );
+                        continue;
+                    }
+                    assertFalse(ranked[i].unavailable, "readable agent flagged unavailable");
+                    assertEq(ranked[i].unavailableSource, address(0));
                     _assertScore(agent, skill, ranked[i].score);
                     assertEq(
                         keccak256(abi.encode(ranked[i].score)),
@@ -376,14 +418,33 @@ contract AgentSkillStatefulTest is StdInvariant, Test {
                 assertEq(occurrences, 1, "active agent missing or duplicated");
             }
             assertEq(ranked.length, activeCount, "hidden or phantom agent ranked");
-            for (uint256 i = 1; i < ranked.length; ++i) {
+            uint256 scored = ranked.length - unreadableCount;
+            for (uint256 i = 1; i < scored; ++i) {
                 assertGe(ranked[i - 1].score.total, ranked[i].score.total);
                 if (ranked[i - 1].score.total == ranked[i].score.total) {
                     assertLt(ranked[i - 1].agentId, ranked[i].agentId);
                 }
             }
+            // The unreadable tail follows candidate (first registration) order.
+            uint256 cursor = scored;
+            uint256[] memory order = model.candidates(skill);
+            for (uint256 c; c < order.length; ++c) {
+                uint256 agent = order[c];
+                if (!model.active(agent, skill) || !model.unreadable(agent)) continue;
+                assertEq(ranked[cursor++].agentId, model.agentId(agent), "unreadable tail out of scan order");
+            }
+            assertEq(cursor, ranked.length);
         }
     }
+
+    function unreadableTail(AgentSkill.RankedAgent[] memory ranked) internal pure returns (uint256 tail) {
+        for (uint256 i = ranked.length; i > 0; --i) {
+            if (!ranked[i - 1].unavailable) break;
+            ++tail;
+        }
+    }
+
+    function _empty() internal pure returns (AgentSkill.ScoreBreakdown memory score) {}
 
     /// @dev Deterministic reachability check complements random sequence exploration.
     function test_handlerExercisesSuccessRejectionTransferAndBothHistoryModes() public {
@@ -400,6 +461,34 @@ contract AgentSkillStatefulTest is StdInvariant, Test {
         invariant_catalogAndSkillsMatchTheModel();
         invariant_endorsementsAreConservedAndIsolatedPerPair();
         invariant_rankingsContainExactlyActiveAgentsWithCurrentScores();
+        // An outage for the seeded top agent of skill 0 moves it to the reported tail, then back.
+        model.outage(0, true);
+        invariant_rankingsContainExactlyActiveAgentsWithCurrentScores();
+        (AgentSkill.RankedAgent[] memory ranked,,) = app.getTopAgents(model.skillId(0), 0, 50, 20);
+        assertEq(ranked.length, 2);
+        assertEq(ranked[0].agentId, model.agentId(1));
+        assertFalse(ranked[0].unavailable);
+        assertEq(ranked[1].agentId, model.agentId(0));
+        assertTrue(ranked[1].unavailable);
+        uint256 seededAgent = model.agentId(0);
+        bytes32 seededSkill = model.skillId(0);
+        address reputationRegistry = address(app.REPUTATION_REGISTRY());
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                AgentSkill.ScoreSourceUnavailable.selector, reputationRegistry, seededAgent
+            )
+        );
+        app.getScoreBreakdown(seededAgent, seededSkill);
+        model.outage(0, false);
+        invariant_rankingsContainExactlyActiveAgentsWithCurrentScores();
+        // Swap-and-pop: hiding agent 0's first skill moves its last skill into the gap.
+        model.register(0, 2);
+        model.hide(0, 0);
+        AgentSkill.Skill[] memory skills = app.getAgentSkills(model.agentId(0));
+        assertEq(skills.length, 2);
+        assertEq(skills[0].id, model.skillId(2));
+        assertEq(skills[1].id, model.skillId(1));
+        invariant_catalogAndSkillsMatchTheModel();
         model.workMode(false);
         model.unauthorized(3, 1, 0);
         assertGt(model.successfulRegistrations(), 4);
