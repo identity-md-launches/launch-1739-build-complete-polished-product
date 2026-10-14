@@ -25,16 +25,27 @@ export function rankCompare(a, b) {
   return BigInt(a.agentId) < BigInt(b.agentId) ? -1 : BigInt(a.agentId) > BigInt(b.agentId) ? 1 : 0;
 }
 
-/** Merge the top K of every candidate page to obtain the exact global top K. */
+/** Merge the top K of every candidate page to obtain the exact global top K. Unscored entries never rank. */
 export function mergeRanked(pages, limit = 20) {
   const unique = new Map();
-  for (const page of pages) for (const agent of page) unique.set(String(agent.agentId), agent);
+  for (const page of pages) for (const agent of page) if (!agent.unavailable) unique.set(String(agent.agentId), agent);
   return [...unique.values()].sort(rankCompare).slice(0, limit);
 }
 
-/** Pin every eth_call to one block, including the policy, avoiding mixed-block leaderboard claims. */
+/** Candidates the contract flagged as unscorable at this block, with the evidence source that failed. */
+export function collectUnavailable(pages) {
+  const unique = new Map();
+  for (const page of pages) for (const agent of page) if (agent.unavailable) unique.set(String(agent.agentId), { agentId: BigInt(agent.agentId), source: agent.unavailableSource });
+  return [...unique.values()].sort((a, b) => (a.agentId < b.agentId ? -1 : a.agentId > b.agentId ? 1 : 0));
+}
+
+/**
+ * Pin every eth_call to one block, including the policy, avoiding mixed-block leaderboard claims.
+ * A page may stop before its scan limit when the RPC's call gas runs out; the loop simply continues
+ * from the returned cursor, so a long history never blocks the rest of the leaderboard.
+ */
 export async function loadLeaderboard(contract, skillId, blockTag, { onProgress = () => {}, cancelled = () => false } = {}) {
-  let offset = 0n, total = 0n, ranked = [];
+  let offset = 0n, total = 0n, ranked = [], unavailable = [];
   do {
     if (cancelled()) return null;
     const page = await contract.getTopAgents(skillId, offset, 20, 20, { blockTag });
@@ -46,9 +57,10 @@ export async function loadLeaderboard(contract, skillId, blockTag, { onProgress 
     total = BigInt(candidates);
     offset = BigInt(next);
     ranked = mergeRanked([ranked, entries]);
+    unavailable = collectUnavailable([unavailable.map(u => ({ agentId: u.agentId, unavailable: true, unavailableSource: u.source })), entries]);
     onProgress(offset, total);
   } while (offset < total);
-  return { ranked, totalCandidates: total, blockTag };
+  return { ranked, unavailable, totalCandidates: total, blockTag };
 }
 
 export function safeHttpUrl(value, { allowLocal = false } = {}) {
@@ -78,12 +90,13 @@ export function readableError(error, contractInterface) {
     DuplicateEndorsement: "This agent or wallet has already endorsed that skill.",
     SkillAlreadyActive: "That skill is already on this agent’s profile.",
     SkillNotActive: "This agent no longer advertises that skill. Refresh to see the latest profile.",
-    SkillLimitReached: "This agent has used its 32 distinct skill slots. You can reactivate a hidden skill.",
+    SkillLimitReached: "This agent already shows 32 skills. Hide one to make room for another.",
     InvalidSkill: "Use 1–48 characters: letters, numbers, spaces, or + # . / -.",
-    ScoreSourceUnavailable: "An on-chain evidence source is unavailable. Scores have not been substituted. Try again later.",
+    ScoreSourceUnavailable: "An on-chain evidence source failed or needed more than its gas budget for this agent. No score has been substituted.",
+    InsufficientCallGas: "This RPC does not allow enough gas for one evidence read. Choose another RPC, or the owner can lower the source gas budget.",
     RegistryUnavailable: "An official registry could not be read on this network. Check your Ethereum connection.",
     OwnableUnauthorizedAccount: "Only the deployment owner can change ranking policy.",
-    InvalidPolicy: "Check the publisher list, metric, or work adapter. The contract rejected this policy.",
+    InvalidPolicy: "Check the publisher list, metric tags, gas budget, or work adapter. The contract rejected this policy.",
   };
   if (messages[name]) return messages[name];
   if (error?.code === 4001 || error?.code === "ACTION_REJECTED" || error?.info?.error?.code === 4001) return "Request cancelled in your wallet. Nothing changed.";

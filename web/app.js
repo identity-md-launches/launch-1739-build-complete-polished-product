@@ -117,12 +117,12 @@ function updateChips(skill) {
 }
 
 async function readPolicy(blockTag) {
-  const [clients, tag1, tag2, adapter, version, owner] = await Promise.all([
+  const [clients, tag1, tag2, adapter, version, owner, gasBudget] = await Promise.all([
     state.contract.getTrustedClients({ blockTag }), state.contract.reputationTag1({ blockTag }),
     state.contract.reputationTag2({ blockTag }), state.contract.workHistory({ blockTag }),
-    state.contract.policyVersion({ blockTag }), state.contract.owner({ blockTag }),
+    state.contract.policyVersion({ blockTag }), state.contract.owner({ blockTag }), state.contract.sourceGasBudget({ blockTag }),
   ]);
-  return { clients, tag1, tag2, adapter, version, owner, blockTag };
+  return { clients, tag1, tag2, adapter, version, owner, gasBudget, blockTag };
 }
 
 function renderPolicy(policy) {
@@ -130,7 +130,9 @@ function renderPolicy(policy) {
   const details = $("#policy-details");
   details.replaceChildren();
   details.append(element("strong", "", `Published policy · version ${policy.version}`));
-  details.append(element("p", "", `Rating metric: ${policy.tag1}${policy.tag2 ? ` / ${policy.tag2}` : ""}. Source: official ERC-8004 Reputation Registry.`));
+  const metric = policy.tag1 ? `Rating metric: ${policy.tag1}${policy.tag2 ? ` / ${policy.tag2}` : ""}.` : `Rating metric: every record from the trusted publishers${policy.tag2 ? ` with secondary tag ${policy.tag2}` : ""}.`;
+  details.append(element("p", "", `${metric} Source: official ERC-8004 Reputation Registry.`));
+  details.append(element("p", "", `Evidence gas budget: ${Number(policy.gasBudget).toLocaleString()} gas per source read. An agent whose history needs more is listed as unscored, never as zero.`));
   details.append(element("p", "", policy.adapter === ZeroAddress ? "History mode: historical rating evidence. No accepted-work ledger is configured." : "History mode: accepted work from the configured ledger adapter."));
   if (policy.adapter !== ZeroAddress) details.append(link(`Work adapter: ${policy.adapter}`, `${CONFIG.explorerUrl}/address/${policy.adapter}`));
   if (!policy.clients.length) details.append(element("p", "", "The owner has not yet configured trusted feedback publishers. Rankings are unavailable until this is published."));
@@ -144,6 +146,7 @@ function renderPolicy(policy) {
   $("#metric-form [name=tag1]").value = policy.tag1;
   $("#metric-form [name=tag2]").value = policy.tag2;
   $("#work-form [name=adapter]").value = policy.adapter === ZeroAddress ? "" : policy.adapter;
+  $("#budget-form [name=budget]").value = String(policy.gasBudget);
 }
 
 async function connectRead(config) {
@@ -228,10 +231,16 @@ async function refreshRanking() {
     $("#results-meta").textContent = result.ranked.length ? `Top ${result.ranked.length} · all ${result.totalCandidates.toLocaleString()} candidate registrations checked` : "No active profiles for this specialty yet.";
     $("#snapshot-label").textContent = `Ethereum · block ${blockTag.toLocaleString()} · policy ${policy.version}`;
     if (!result.ranked.length) {
+      if (result.unavailable.length) {
+        emptyResults("Evidence could not be read for these agents.", `${result.unavailable.length} ${titleSkill(skill)} profile${result.unavailable.length === 1 ? "" : "s"} could not be scored at this block, so nothing is ranked yet. Open a profile to see which evidence source failed.`);
+        renderUnavailable(result.unavailable, skill);
+        return;
+      }
       emptyResults("Be the first in your specialty.", `No agent currently advertises ${titleSkill(skill)} here. Add it to your profile and bring your existing reputation with you.`, "Add your skill →", openManage);
       return;
     }
     renderRankings(result.ranked, skill);
+    renderUnavailable(result.unavailable, skill);
   } catch (error) {
     if (epoch !== state.epoch) return;
     rankingStatus(explainError(error), true);
@@ -241,6 +250,21 @@ async function refreshRanking() {
   } finally {
     if (epoch === state.epoch) $("#results").setAttribute("aria-busy", "false");
   }
+}
+
+function renderUnavailable(unavailable, skill) {
+  if (!unavailable.length) return;
+  const note = element("aside", "soft-note unscored-note");
+  note.append(element("strong", "", `${unavailable.length} ${titleSkill(skill)} profile${unavailable.length === 1 ? "" : "s"} could not be scored at this block.`));
+  note.append(element("p", "", "An evidence source failed or needed more than the published gas budget. These agents are not ranked and no score was invented for them."));
+  const list = element("div", "unscored-list");
+  unavailable.forEach(entry => {
+    const item = button(`Agent #${entry.agentId}`, () => openProfile(entry.agentId), "chip");
+    item.title = entry.source.toLowerCase() === REPUTATION.toLowerCase() ? "Reputation Registry read failed" : `Source ${entry.source} failed`;
+    list.append(item);
+  });
+  note.append(list);
+  $("#results").append(note);
 }
 
 function renderRankings(ranked, skill) {
@@ -497,6 +521,14 @@ function installEvents() {
     event.preventDefault();
     try { await transact("setReputationMetric", [$("#metric-form [name=tag1]").value, $("#metric-form [name=tag2]").value], "Reputation metric updated."); }
     catch (error) { toast(explainError(error), { error: true }); }
+  });
+  $("#budget-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    try {
+      const budget = $("#budget-form [name=budget]").value.trim();
+      if (!/^\d+$/.test(budget)) throw new Error("Enter a whole number of gas between 1,000,000 and 10,000,000.");
+      await transact("setSourceGasBudget", [BigInt(budget)], "Evidence gas budget updated.");
+    } catch (error) { toast(explainError(error), { error: true }); }
   });
   $("#work-form").addEventListener("submit", async event => {
     event.preventDefault();

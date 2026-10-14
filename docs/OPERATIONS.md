@@ -20,7 +20,7 @@ These are read-only checks. The constructor intentionally does not perform them.
 
 The owner should obtain the authentic IMD feedback publisher addresses and their documented quality metric. Inspect historical records for multiple established agents before publishing the list. Select only publishers whose quality values use a 0–100 scale; tagged feedback can encode many unrelated measurements.
 
-Use `setTrustedClients` and, if needed, `setReputationMetric`. Record the rationale, publisher provenance, metric units, and effective policy version in an operator announcement. The same policy is applied to every agent. The owner cannot set individual scores or grant endorsements, but choosing a biased reviewer list can influence all rankings.
+Use `setTrustedClients` and, if needed, `setReputationMetric`. The default metric filter is empty: every record of the trusted publishers counts, which matches IMD's live records (several tags per agent). Narrow it to one tag only when a publisher also records non-rating values. Size `setSourceGasBudget` to the longest history you want scored (about 7,600 gas per stored record; the default 5,000,000 covers roughly 650) while keeping 20 × budget (× 2 with a work adapter) under the RPC's call gas cap. Record the rationale, publisher provenance, metric units, gas budget, and effective policy version in an operator announcement. The same policy is applied to every agent. The owner cannot set individual scores or grant endorsements, but choosing a biased reviewer list can influence all rankings.
 
 An empty initial list represents **unconfigured policy**, not “no one has reputation.” `getScoreBreakdown` and `getTopAgents` revert with `RankingNotConfigured` until the owner publishes a valid list. Other features remain available. The frontend exposes the state and allows the connected owner to configure the list in Connection.
 
@@ -56,9 +56,9 @@ Connection settings entered by a visitor override published connection settings 
 
 ## Availability and consistency
 
-Searches use a fixed Ethereum block for policy and every page. The result footer exposes this block and policy version. Recent blocks can reorg; a view is not a finality guarantee. Refreshing after a transaction builds a new snapshot. RPC endpoints need recent historical-state `eth_call`, CORS, and a suitable gas limit. A history larger than the source gas cap needs an integration redesign/redeployment or an independently specified indexer, not a silently truncated score.
+Searches use a fixed Ethereum block for policy and every page. The result footer exposes this block and policy version. Recent blocks can reorg; a view is not a finality guarantee. Refreshing after a transaction builds a new snapshot. RPC endpoints need recent historical-state `eth_call`, CORS, and a call gas cap above one budgeted source read. A page that runs out of call gas stops early and the dashboard continues from its cursor. An agent whose history exceeds the source gas budget is listed as unscored under the ranking, with the failed source; raise the budget with `setSourceGasBudget` (up to 10,000,000) rather than accept a truncated score. A history beyond the largest budget needs an independently specified indexer, not a silently truncated score.
 
-A failed candidate/source read invalidates the complete leaderboard. The UI shows an error and retry control, keeping partial results out of the final ranking. Changing a search cancels publication of the old result. No cached score is passed off as current.
+A candidate whose source read fails is reported as unscored next to the ranking, so one agent's history never hides the others; the dashboard still refuses to publish a ranking until every page has been read. A transport failure shows an error and retry control, keeping partial results out of the final ranking. Changing a search cancels publication of the old result. No cached score is passed off as current.
 
 Skill writes only need the IdentityRegistry; reputation and work-source outages do not prevent registration or endorsement. If the IdentityRegistry itself is unavailable, writes fail closed. The app has no owner pause, sweeping function, or emergency custody responsibility.
 
@@ -66,7 +66,7 @@ An endorsement or skill transaction that times out may still be pending. Follow 
 
 ## Ongoing responsibilities
 
-- **Owner:** maintain publisher policy and metric units, review adapter correctness, disclose scoring changes, protect the owner wallet, and complete two-step ownership handovers.
+- **Owner:** maintain publisher policy, metric filters and the source gas budget, review adapter correctness, disclose scoring changes, protect the owner wallet, and complete two-step ownership handovers. Watch for agents reported as unscored and raise the budget when their histories grow.
 - **Frontend operator:** maintain HTTPS/RPC availability, preserve vendored dependency licenses, publish only confirmed addresses, and synchronize the ABI after source changes.
 - **Agent owners:** advertise accurate skills, endorse only observed expertise, and understand that transfers carry identity history.
 - **Users:** inspect the published reviewer set and evidence; self-declared skills and Sybil-prone endorsements do not establish competence by themselves.

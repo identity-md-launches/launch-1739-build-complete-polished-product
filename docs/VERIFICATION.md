@@ -1,22 +1,23 @@
 # Local verification record
 
-The implementation was checked locally on 2026-10-14. These are reproducible development checks, not an independent audit or a production deployment attestation.
+The implementation was checked locally on 2026-10-14 and re-checked after the revision of the same day. These are reproducible development checks, not an independent audit or a production deployment attestation.
 
 ## Foundry
 
 - Compiler: Solidity 0.8.26, pinned in `foundry.toml`.
 - Seed: `0xd9abfe71f2055d0868d0a24539113f27a9d2c4acc16d0d4273df17ed8888b709`.
-- 33 tests across application, stateful invariant, adversarial source and deployment-policy suites.
+- 42 tests across application, stateful invariant, adversarial source and deployment-policy suites.
 - Four fuzz tests, 512 runs each: formula bounds/exactness, work arithmetic, sorting, and skill normalization.
 - Stateful invariant: 128 runs × 64 calls, 8,192 actions covering endorsement, identity transfer and visibility changes.
-- Source-failure tests include a gas-exhausting reputation source, failed candidate aggregation, and an identity source attempting a state mutation through a static read even while holding application-owner authority.
+- Source-failure tests include a gas-exhausting reputation source, an official-shaped registry with a 320-record history scored within the default budget and reported as unavailable below it, a failed candidate that is reported next to the ranked agents, a slow source that makes a page stop early and resume from its cursor, a caller without gas for one budgeted read, malformed and out-of-range source answers, and an identity source attempting a state mutation through a static read even while holding application-owner authority.
+- Policy tests cover the match-all metric default and its interaction with per-tag records, the gas budget bounds and event, and hidden skills releasing their slots.
 - Runtime is below EIP-170, constructor input is below the init-code bound, and the local deployment rehearsal finds no forbidden escape opcodes outside PUSH data.
 
 Run `make check` for build, tests, formatting and frontend logic tests. No fork or network is required. Test mocks live only under `test/` and are not launch applications.
 
 ## Frontend logic
 
-Nine Node tests verify skill canonicalization, full uint256 IDs, page merging and stable ties, same-block global reads, empty/hidden candidates, cancellation, broken cursors, failure of complete rankings rather than partial fallback, safe external links, custom error decoding, and parity of the committed ABI with the compiled contract.
+Eleven Node tests verify skill canonicalization, full uint256 IDs, page merging and stable ties, exclusion and reporting of unscored candidates, resumption of early-stopped pages, same-block global reads, empty/hidden candidates, cancellation, broken cursors, failure of complete rankings rather than partial fallback, safe external links, custom error decoding, and parity of the committed ABI with the compiled contract.
 
 ## Browser behavior
 

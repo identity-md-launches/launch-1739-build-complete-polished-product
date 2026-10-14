@@ -17,7 +17,7 @@ flowchart LR
 
 ## Skills and authorization
 
-The contract keys records by `(agentId, keccak256(canonicalSkill))`. Each agent has a bounded array of distinct registered skill IDs. Each skill has a permanent append-only candidate array; hiding and reactivating a skill do not append the same agent twice. A global catalog supports bounded enumeration. Skill hashes, display names, count getters and mutation events support an external indexer without requiring one for the supplied dashboard.
+The contract keys records by `(agentId, keccak256(canonicalSkill))`. Each agent has a bounded array of its active skill IDs (at most 32); hiding swaps the skill out of that array and frees the slot, while a `known` flag remembers that the pair was registered before. Each skill has a permanent append-only candidate array; hiding and reactivating a skill do not append the same agent twice. A global catalog supports bounded enumeration. Skill hashes, display names, count getters and mutation events support an external indexer without requiring one for the supplied dashboard.
 
 `ownerOf` must return the current token owner. Only that owner can mutate the identity's skills or endorse through it. No signature relaying, approved-operator delegation, `agentWallet` delegation, or `tx.origin` authorization is implemented. This narrower authority prevents ordinary NFT marketplace approvals from granting skill/endorsement management.
 
@@ -27,7 +27,7 @@ Endorsement counts equal the number of successful endorsement events. Each targe
 
 Let `B = 10,000`. Computation uses integer arithmetic and rounds down.
 
-1. Call official `getSummary(agentId, trustedClients, reputationTag1, reputationTag2)` for `(N, V, D)`. Records revoked in that registry are excluded by the registry. Reject invalid decimal precision above 18. If `N = 0` or `V <= 0`, `R = 0`; otherwise `R = min(B, floor(V * 100 / 10^D))`. The implementation clamps high values before multiplying to avoid overflow.
+1. Call official `getSummary(agentId, trustedClients, reputationTag1, reputationTag2)` for `(N, V, D)` through a budgeted STATICCALL (`sourceGasBudget` gas). Empty tags are the registry's match-all filter and the default. Records revoked in that registry are excluded by the registry. A call that reverts, exhausts its budget, returns anything other than three words, a count above `uint64`, a value outside `int128`, or a precision above 18 makes the source unavailable. If `N = 0` or `V <= 0`, `R = 0`; otherwise `R = min(B, floor(V * 100 / 10^D))`. The implementation clamps high values before multiplying to avoid overflow.
 2. If an audited work source is configured, read `(C, A)` where `C` is finalized jobs and `A` is accepted jobs. Reject `A > C`. For `C > 0`, `H = floor(A * B * min(C, 20) / (C * 20))`; otherwise `H = 0`.
 3. Without a work source, `H = floor(R * min(N, 20) / 20)`. This is **quality-weighted history depth**, not proof of work completion. Its correlation with `R` is intentional and disclosed. Twenty records reach full depth; one favorable review does not earn the entire history allocation.
 4. `reputationPoints = floor(R * 6000 / B)`.
@@ -49,7 +49,7 @@ No blanket baseline score is assigned. “Do not start from zero” means establ
 | 90/100 quality, work source reports 1 accepted of 1 finalized | 0 | 55.25 |
 | 100/100 quality, 20/20 accepted, at least 20 endorsements | 20 | 100.00 |
 
-If a work source is configured but reports no jobs for an agent, its history component is zero. It does not silently substitute feedback for that agent. If any configured source fails, score reads fail; the caller must not manufacture a zero or rank only the agents whose sources happened to respond.
+If a work source is configured but reports no jobs for an agent, its history component is zero. It does not silently substitute feedback for that agent. If any configured source fails for an agent, `getScoreBreakdown` reverts with `ScoreSourceUnavailable(source, agentId)`, and `getTopAgents` returns that agent flagged `unavailable` with the failed source and an all-zero breakdown, after the scored list. A client must show such agents as unscored, never as zero, and must not treat a leaderboard as complete without listing them.
 
 The official registry itself may round mixed-precision averages to the most frequent feedback precision. AgentSkill preserves the returned raw `reputationValue` and `reputationDecimals` and does not claim more precision than that source provides.
 
@@ -60,13 +60,15 @@ The official registry itself may round mixed-precision averages to the most freq
 - `scanLimit`: 1–50.
 - `resultLimit`: 1–20 and no larger than `scanLimit`.
 - `offset` may equal the candidate count, returning an empty terminal page. Greater offsets are errors.
+- `ranked` holds at most `resultLimit` scored entries in descending order, followed by every scanned candidate whose evidence could not be read (`unavailable = true`, `unavailableSource` set). The array can therefore be longer than `resultLimit`, but never longer than `resultLimit + scanLimit`.
+- Before each scored candidate the contract checks that the remaining call gas covers one full budgeted read per configured source (`budget + budget/63 + 60,000`, so EIP-150's retained 1/64 cannot starve the source). If it does not, the page ends there and `nextOffset` points at the unread candidate; if not even the first candidate fits, the call reverts with `InsufficientCallGas(required)` so a stuck cursor is never returned.
 - The catalog's `getSkills` has the same 50-entry page bound.
 
 To obtain an exact global top 20, read each candidate page's top 20 and merge them, retaining the highest 20. Every global winner must be in its own page's top 20. The dashboard does this automatically, at one fixed block number, and publishes results only after **all** pages complete. The UI labels the number of candidate registrations checked; that count can include hidden registrations. It does not claim a first-page ranking is global.
 
-Contract cost is bounded by `scanLimit × resultLimit` comparisons and at most one reputation/work read per candidate (plus identity existence). Storage growth does not increase transaction loop sizes. The external ReputationRegistry implementation internally scans feedback records; a 2,000,000-gas per-source cap prevents an adapter or registry from consuming arbitrary gas in a single read. A large history can exceed this bound: the entire score is then explicitly unavailable. The product never silently drops that agent.
+Contract cost is bounded by `scanLimit × resultLimit` comparisons and at most one reputation/work read per candidate (plus identity existence). Storage growth does not increase transaction loop sizes. The external ReputationRegistry implementation internally loads every stored record of every listed client (about 7,600 gas each on the verified mainnet implementation), so the owner-adjustable `sourceGasBudget` (default 5,000,000, range 1,000,000–10,000,000) bounds both what an adapter or registry can consume in one read and the history size that can be scored. An agent beyond the budget is reported as unavailable in the leaderboard and reverts explicitly in a single read; the owner can raise the budget, and no agent is ever silently dropped or scored as zero.
 
-RPCs may impose tighter total gas limits. Reduce the browser page size together with its per-page result limit and retain top 20 during merging if necessary. When scanning fewer than 20 candidates, retaining every candidate in that page is sufficient. Very large registries can require an indexer using events and the same source semantics; such an indexer is not needed for the delivered app and is not claimed to exist.
+RPCs impose total `eth_call` gas caps (commonly 50,000,000). The early page stop adapts to them automatically: the dashboard resumes from `nextOffset`, so even a page of twenty agents each needing the full budget completes in several calls. Reduce the browser page size together with its per-page result limit and retain top 20 during merging if a provider caps calls below one budgeted read. When scanning fewer than 20 candidates, retaining every candidate in that page is sufficient. Very large registries can require an indexer using events and the same source semantics; such an indexer is not needed for the delivered app and is not claimed to exist.
 
 ## Frontend boundaries
 

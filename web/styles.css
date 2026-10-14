@@ -8,3 +8,4 @@
 @media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*:before,*:after{animation:none!important;transition:none!important}}
 @media(max-width:620px){.search-heading h2{font-size:21px}.score-card{grid-column:1 / -1;grid-row:auto}.score-card h3{font-size:28px}.score-card>p{font-size:12px;max-width:280px}.card-eyebrow{font-size:8px;letter-spacing:1px}.weight-list{font-size:12px}.weight-list li{margin-bottom:14px}.score-card .text-button{font-size:12px}.profile-search{border-top:0;padding-top:18px}.contribute-card{padding-top:6px}.contribute-card h3{font-size:14px}.contribute-card p{font-size:11px}}
 .text-button,.agent-name{min-height:24px}.agent-name,.panel-heading h3,.profile-title h2,.profile-skill-heading h3{overflow-wrap:anywhere;min-width:0}.agent-row>div,.profile-title>div{min-width:0}
+.unscored-note{margin:14px 24px 24px}.unscored-list{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}

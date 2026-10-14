@@ -11,7 +11,9 @@ import {IAgentWorkHistory} from "./interfaces/IAgentWorkHistory.sol";
 /// @notice Ethereum ERC-8004 identities register their skills and endorse other identities.
 /// @dev No custody, token, proxy, payable entrypoint, or external state-changing call.
 /// Scores are live reads, not reset on enrollment. All score components are basis points (0..10,000).
-/// The owner selects feedback publishers/metric and an optional work adapter, never individual scores.
+/// Trust model: the owner never writes a score, but the owner-selected feedback publishers (and the
+/// optional work adapter) author the reputation and history components, 85% of every score. Anyone
+/// may publish feedback in the official registry; only records from the trusted set are read.
 contract AgentSkill is Ownable2Step {
     /// @notice Official Ethereum ERC-8004 IdentityRegistry; agent IDs are scoped to this registry.
     IIdentityRegistry public constant IDENTITY_REGISTRY =
@@ -31,7 +33,7 @@ contract AgentSkill is Ownable2Step {
     uint256 public constant ENDORSEMENT_CAP = 20;
     /// @notice Finalized work outcomes (or feedback records in fallback mode) for full confidence.
     uint256 public constant HISTORY_CONFIDENCE_CAP = 20;
-    /// @notice Maximum distinct skills ever registered by an agent, including hidden skills.
+    /// @notice Maximum concurrently active skills per agent; hidden skills release their slot.
     uint256 public constant MAX_AGENT_SKILLS = 32;
     /// @notice Maximum skill label length in ASCII bytes before normalization.
     uint256 public constant MAX_SKILL_LENGTH = 48;
@@ -41,8 +43,16 @@ contract AgentSkill is Ownable2Step {
     uint256 public constant MAX_SCAN = 50;
     /// @notice Maximum ranked results returned in one page.
     uint256 public constant MAX_RESULTS = 20;
-    /// @notice Per external score-source gas cap; source exhaustion produces an explicit error.
+    /// @notice Gas cap for the cheap existence reads (ownerOf, registry handshakes).
     uint256 public constant SOURCE_GAS_LIMIT = 2_000_000;
+    /// @notice Smallest owner-settable per-source gas budget for a summary read.
+    uint256 public constant MIN_SOURCE_GAS_BUDGET = 1_000_000;
+    /// @notice Largest owner-settable per-source gas budget; keep page size × budget under the RPC call cap.
+    uint256 public constant MAX_SOURCE_GAS_BUDGET = 10_000_000;
+    /// @notice Default per-source gas budget: roughly 650 stored records per agent in the official registry.
+    uint256 public constant DEFAULT_SOURCE_GAS_BUDGET = 5_000_000;
+    /// @notice Gas kept for decoding and arithmetic after a budgeted source read.
+    uint256 public constant CALL_GAS_RESERVE = 60_000;
 
     /// @notice Canonical skill label and its historical, unique endorsement count.
     struct Skill {
@@ -72,23 +82,30 @@ contract AgentSkill is Ownable2Step {
     }
 
     /// @notice One ranked candidate with enough information to display an evidence breakdown.
+    /// @dev When unavailable is true the score is unset (never a fabricated zero) and unavailableSource
+    /// names the registry or adapter that failed, exceeded its gas budget, or returned invalid data.
     struct RankedAgent {
         uint256 agentId;
         ScoreBreakdown score;
+        bool unavailable;
+        address unavailableSource;
     }
 
     struct SkillState {
         bool known;
         bool active;
+        uint32 position;
         uint256 endorsements;
     }
 
     /// @notice Optional authoritative work ledger adapter; unset means historical-feedback mode.
     IAgentWorkHistory public workHistory;
-    /// @notice Primary quality metric tag; must use 0..100 units. ERC-8004's suggested default is starred.
-    string public reputationTag1 = "starred";
-    /// @notice Optional secondary metric filter; empty means all secondary tags within the primary metric.
+    /// @notice Primary metric tag filter. Empty (the default) matches every record of the trusted publishers.
+    string public reputationTag1;
+    /// @notice Optional secondary metric filter; empty means all secondary tags within the primary filter.
     string public reputationTag2;
+    /// @notice Gas forwarded to each summary read (reputation registry and work adapter), per candidate.
+    uint256 public sourceGasBudget = DEFAULT_SOURCE_GAS_BUDGET;
     /// @notice Incremented on every scoring-policy change for reproducible client snapshots.
     uint64 public policyVersion;
 
@@ -118,6 +135,8 @@ contract AgentSkill is Ownable2Step {
     event ReputationMetricChanged(string tag1, string tag2, uint64 version);
     /// @notice Publishes the work ledger adapter, or the absence of one when cleared.
     event WorkHistoryChanged(address indexed adapter, uint64 version);
+    /// @notice Publishes the per-source gas budget used for every summary read.
+    event SourceGasBudgetChanged(uint256 budget, uint64 version);
 
     /// @notice The ID does not resolve to an owner in the official registry.
     error UnregisteredAgent(uint256 agentId);
@@ -145,6 +164,8 @@ contract AgentSkill is Ownable2Step {
     error ScoreSourceUnavailable(address source, uint256 agentId);
     /// @notice A pagination parameter is outside the bounded range.
     error InvalidPage();
+    /// @notice The call carries less gas than one budgeted source read needs; raise the call gas or lower the budget.
+    error InsufficientCallGas(uint256 required);
     /// @notice Renouncing administration would prevent maintaining external-source policy.
     error OwnershipRequired();
 
@@ -168,17 +189,30 @@ contract AgentSkill is Ownable2Step {
         emit TrustedClientsChanged(clients, ++policyVersion);
     }
 
-    /// @notice Selects the actual 0..100 quality metric used by the chosen publishers.
-    /// @param tag1 Nonempty primary metric, at most 48 bytes; defaults to ERC-8004's starred metric.
-    /// @param tag2 Optional secondary metric, at most 48 bytes.
-    /// @dev Never select mixed units, latency, revenue, or binary outcomes as a percentage rating.
+    /// @notice Selects which records of the trusted publishers count as the 0..100 quality rating.
+    /// @param tag1 Primary metric filter, at most 48 bytes. Empty matches every record (the registry's
+    /// match-all filter), which is the default so no publisher tag is silently dropped.
+    /// @param tag2 Optional secondary metric filter, at most 48 bytes; empty matches every secondary tag.
+    /// @dev Narrow to one tag when a trusted publisher also records non-percentage metrics (latency,
+    /// revenue, binary outcomes); the registry has no multi-tag filter, so a tag list cannot be expressed.
     function setReputationMetric(string calldata tag1, string calldata tag2) external onlyOwner {
-        if (bytes(tag1).length == 0 || bytes(tag1).length > 48 || bytes(tag2).length > 48) {
+        if (bytes(tag1).length > MAX_SKILL_LENGTH || bytes(tag2).length > MAX_SKILL_LENGTH) {
             revert InvalidPolicy();
         }
         reputationTag1 = tag1;
         reputationTag2 = tag2;
         emit ReputationMetricChanged(tag1, tag2, ++policyVersion);
+    }
+
+    /// @notice Sets the gas forwarded to each summary read; a source that needs more is reported unavailable.
+    /// @param budget Gas per read, between MIN_SOURCE_GAS_BUDGET and MAX_SOURCE_GAS_BUDGET.
+    /// @dev The official getSummary scans every stored record of every listed client (about 7,600 gas each),
+    /// so the budget bounds the history size that can be scored. Each getTopAgents page may spend up to
+    /// scanLimit × budget per configured source; keep that under the RPC's eth_call gas cap.
+    function setSourceGasBudget(uint256 budget) external onlyOwner {
+        if (budget < MIN_SOURCE_GAS_BUDGET || budget > MAX_SOURCE_GAS_BUDGET) revert InvalidPolicy();
+        sourceGasBudget = budget;
+        emit SourceGasBudgetChanged(budget, ++policyVersion);
     }
 
     /// @notice Configures an audited adapter over the actual IMD accepted-work ledger.
@@ -216,16 +250,18 @@ contract AgentSkill is Ownable2Step {
     /// @param agentId Registered ERC-8004 token ID; only its current owner may call.
     /// @param name Human-readable ASCII skill name, canonicalized to lowercase and single spaces.
     /// @return skillId Hash of the canonical skill name.
+    /// @dev The cap counts active skills only. A skill ever registered stays a ranking candidate once,
+    /// so reactivation never pushes the agent into the candidate list twice.
     function registerSkill(uint256 agentId, string calldata name) external returns (bytes32 skillId) {
         _requireOwner(agentId);
         string memory canonical;
         (skillId, canonical) = normalizeSkill(name);
         SkillState storage state = _skills[agentId][skillId];
         if (state.active) revert SkillAlreadyActive();
+        bytes32[] storage active = _agentSkills[agentId];
+        if (active.length >= MAX_AGENT_SKILLS) revert SkillLimitReached();
         if (!state.known) {
-            if (_agentSkills[agentId].length >= MAX_AGENT_SKILLS) revert SkillLimitReached();
             state.known = true;
-            _agentSkills[agentId].push(skillId);
             _skillAgents[skillId].push(agentId);
             if (bytes(_skillNames[skillId]).length == 0) {
                 _skillNames[skillId] = canonical;
@@ -233,16 +269,29 @@ contract AgentSkill is Ownable2Step {
             }
         }
         state.active = true;
+        state.position = uint32(active.length);
+        active.push(skillId);
         emit SkillRegistered(agentId, skillId, canonical);
     }
 
-    /// @notice Hides a skill from discovery without resetting endorsements or consuming a new slot later.
+    /// @notice Hides a skill from discovery, releasing its slot without resetting endorsements.
     /// @param agentId Identity owned by the caller.
     /// @param skillId Canonical skill hash.
+    /// @dev Swap-and-pop removal: the agent's last active skill takes the hidden skill's place.
     function hideSkill(uint256 agentId, bytes32 skillId) external {
         _requireOwner(agentId);
-        if (!_skills[agentId][skillId].active) revert SkillNotActive();
-        _skills[agentId][skillId].active = false;
+        SkillState storage state = _skills[agentId][skillId];
+        if (!state.active) revert SkillNotActive();
+        bytes32[] storage active = _agentSkills[agentId];
+        uint256 last = active.length - 1;
+        if (state.position != last) {
+            bytes32 moved = active[last];
+            active[state.position] = moved;
+            _skills[agentId][moved].position = state.position;
+        }
+        active.pop();
+        state.active = false;
+        state.position = 0;
         emit SkillHidden(agentId, skillId);
     }
 
@@ -268,21 +317,14 @@ contract AgentSkill is Ownable2Step {
 
     /// @notice Returns all active skills of an agent, bounded by MAX_AGENT_SKILLS.
     /// @param agentId Registered agent token ID.
-    /// @return skills Canonical names, hashes, and unique endorsement counts, in registration order.
+    /// @return skills Canonical names, hashes, and unique endorsement counts; hiding a skill may reorder the list.
     function getAgentSkills(uint256 agentId) external view returns (Skill[] memory skills) {
         _agentOwner(agentId);
         bytes32[] storage ids = _agentSkills[agentId];
-        uint256 count;
-        for (uint256 i; i < ids.length; ++i) {
-            if (_skills[agentId][ids[i]].active) ++count;
-        }
-        skills = new Skill[](count);
-        count = 0;
+        skills = new Skill[](ids.length);
         for (uint256 i; i < ids.length; ++i) {
             bytes32 id = ids[i];
-            if (_skills[agentId][id].active) {
-                skills[count++] = Skill(id, _skillNames[id], _skills[agentId][id].endorsements);
-            }
+            skills[i] = Skill(id, _skillNames[id], _skills[agentId][id].endorsements);
         }
     }
 
@@ -333,10 +375,13 @@ contract AgentSkill is Ownable2Step {
     /// @param offset Candidate offset from the previous call's nextOffset; zero starts a search.
     /// @param scanLimit Candidates to examine, 1..50. Hidden skills are skipped but advance the cursor.
     /// @param resultLimit Results to retain, 1..20, no greater than scanLimit.
-    /// @return ranked Top candidates within this page; ties use lower agent ID first.
-    /// @return nextOffset Cursor for the next page.
+    /// @return ranked Top scored candidates within this page (ties use lower agent ID first), followed by
+    /// every scanned candidate whose evidence could not be read, flagged `unavailable` with its source.
+    /// @return nextOffset Cursor for the next page. It is below offset + scanLimit when the call ran out of
+    /// gas for another budgeted source read; continue from it with the same block to finish the scan.
     /// @return totalCandidates All historical candidates, including hidden registrations.
     /// @dev For GLOBAL top K, merge every page's top K at the SAME block. No cap on total registrations.
+    /// One unscorable agent never hides the others, and its absence is reported rather than scored as zero.
     function getTopAgents(bytes32 skillId, uint256 offset, uint256 scanLimit, uint256 resultLimit)
         external
         view
@@ -347,38 +392,9 @@ contract AgentSkill is Ownable2Step {
         }
         if (_trustedClients.length == 0) revert RankingNotConfigured();
         _checkReputationRegistry();
-        uint256[] storage candidates = _skillAgents[skillId];
-        totalCandidates = candidates.length;
+        totalCandidates = _skillAgents[skillId].length;
         nextOffset = _pageEnd(offset, scanLimit, totalCandidates);
-        ranked = new RankedAgent[](resultLimit);
-        uint256 count;
-        for (uint256 i = offset; i < nextOffset; ++i) {
-            uint256 id = candidates[i];
-            if (!_skills[id][skillId].active) continue;
-            // The official registry has no public burn operation; ownership transfers preserve identity history.
-            _agentOwner(id);
-            ScoreBreakdown memory score = _score(id, skillId);
-            uint256 position = count;
-            for (uint256 j; j < count; ++j) {
-                if (
-                    score.total > ranked[j].score.total
-                        || (score.total == ranked[j].score.total && id < ranked[j].agentId)
-                ) {
-                    position = j;
-                    break;
-                }
-            }
-            if (position >= resultLimit) continue;
-            if (count < resultLimit) ++count;
-            for (uint256 j = count - 1; j > position; --j) {
-                ranked[j] = ranked[j - 1];
-            }
-            ranked[position] = RankedAgent(id, score);
-        }
-        // Only truncate an allocated memory array; its elements and their pointers remain intact.
-        assembly ("memory-safe") {
-            mstore(ranked, count)
-        }
+        (ranked, nextOffset) = _scanPage(skillId, offset, nextOffset, resultLimit);
     }
 
     /// @notice Canonicalizes ASCII labels so spacing and letter case cannot split a leaderboard.
@@ -448,36 +464,160 @@ contract AgentSkill is Ownable2Step {
         }
     }
 
-    function _score(uint256 agentId, bytes32 skillId) private view returns (ScoreBreakdown memory s) {
-        try REPUTATION_REGISTRY.getSummary{gas: SOURCE_GAS_LIMIT}(
-            agentId, _trustedClients, reputationTag1, reputationTag2
-        ) returns (
-            uint64 count, int128 value, uint8 decimals
-        ) {
-            if (decimals > 18) revert ScoreSourceUnavailable(address(REPUTATION_REGISTRY), agentId);
-            s.feedbackCount = count;
-            s.reputationValue = value;
-            s.reputationDecimals = decimals;
-            if (count != 0) s.reputationBps = _normalizeRating(value, decimals);
-        } catch {
-            revert ScoreSourceUnavailable(address(REPUTATION_REGISTRY), agentId);
+    /// @dev Scores candidates [offset, end); returns the page and the index the scan actually reached.
+    function _scanPage(bytes32 skillId, uint256 offset, uint256 end, uint256 resultLimit)
+        private
+        view
+        returns (RankedAgent[] memory ranked, uint256 stoppedAt)
+    {
+        ranked = new RankedAgent[](resultLimit + end - offset);
+        uint256 count;
+        uint256 failed;
+        uint256 gasPerCandidate = _candidateGas();
+        stoppedAt = end;
+        for (uint256 i = offset; i < end; ++i) {
+            uint256 id = _skillAgents[skillId][i];
+            if (!_skills[id][skillId].active) continue;
+            if (gasleft() < gasPerCandidate) {
+                // Stop the page early rather than misreport a candidate the caller could not afford to read.
+                if (i == offset) revert InsufficientCallGas(gasPerCandidate);
+                stoppedAt = i;
+                break;
+            }
+            // The official registry has no public burn operation; ownership transfers preserve identity history.
+            _agentOwner(id);
+            RankedAgent memory entry = _rank(id, skillId);
+            if (entry.unavailable) {
+                // Unavailable candidates are appended after the scored list once its final length is known.
+                ranked[resultLimit + failed++] = entry;
+                continue;
+            }
+            count = _insert(ranked, count, resultLimit, entry);
         }
+        for (uint256 j; j < failed; ++j) {
+            ranked[count + j] = ranked[resultLimit + j];
+        }
+        // Only truncate an allocated memory array; its elements and their pointers remain intact.
+        assembly ("memory-safe") {
+            mstore(ranked, add(count, failed))
+        }
+    }
+
+    /// @dev Insertion into a descending list capped at resultLimit; ties use the lower agent ID first.
+    function _insert(
+        RankedAgent[] memory ranked,
+        uint256 count,
+        uint256 resultLimit,
+        RankedAgent memory entry
+    ) private pure returns (uint256) {
+        uint256 position = count;
+        for (uint256 j; j < count; ++j) {
+            if (
+                entry.score.total > ranked[j].score.total
+                    || (entry.score.total == ranked[j].score.total && entry.agentId < ranked[j].agentId)
+            ) {
+                position = j;
+                break;
+            }
+        }
+        if (position >= resultLimit) return count;
+        if (count < resultLimit) ++count;
+        for (uint256 j = count - 1; j > position; --j) {
+            ranked[j] = ranked[j - 1];
+        }
+        ranked[position] = entry;
+        return count;
+    }
+
+    function _rank(uint256 agentId, bytes32 skillId) private view returns (RankedAgent memory entry) {
+        entry.agentId = agentId;
+        bool ok;
+        (ok, entry.unavailableSource, entry.score) = _tryScore(agentId, skillId);
+        entry.unavailable = !ok;
+        if (ok) entry.unavailableSource = address(0);
+    }
+
+    /// @dev Reverting variant for single-agent reads: an unavailable source is an explicit error, never zero.
+    function _score(uint256 agentId, bytes32 skillId) private view returns (ScoreBreakdown memory s) {
+        bool ok;
+        address source;
+        (ok, source, s) = _tryScore(agentId, skillId);
+        if (!ok) revert ScoreSourceUnavailable(source, agentId);
+    }
+
+    /// @dev Gas one candidate needs so that every budgeted read receives its full budget (EIP-150 keeps 1/64).
+    function _candidateGas() private view returns (uint256) {
+        uint256 perRead = _readGas(sourceGasBudget);
+        return address(workHistory) == address(0) ? perRead : 2 * perRead;
+    }
+
+    function _readGas(uint256 budget) private pure returns (uint256) {
+        return budget + budget / 63 + CALL_GAS_RESERVE;
+    }
+
+    /// @dev Budgeted STATICCALL with explicit return-data validation, so a source that reverts, runs out of
+    /// its budget, or answers with the wrong shape is reported instead of decoded into a wrong score.
+    /// Reverts InsufficientCallGas when the caller itself cannot fund the budget: that is the caller's gas,
+    /// not the source's failure.
+    function _budgetedRead(address source, bytes memory data, uint256 words)
+        private
+        view
+        returns (bool ok, bytes memory result)
+    {
+        uint256 budget = sourceGasBudget;
+        uint256 required = _readGas(budget);
+        if (gasleft() < required) revert InsufficientCallGas(required);
+        (ok, result) = source.staticcall{gas: budget}(data);
+        ok = ok && result.length == 32 * words;
+    }
+
+    /// @dev Non-reverting scoring used by the leaderboard so one failed source cannot hide every other agent.
+    function _tryScore(uint256 agentId, bytes32 skillId)
+        private
+        view
+        returns (bool ok, address source, ScoreBreakdown memory s)
+    {
+        bytes memory result;
+        (ok, result) = _budgetedRead(
+            address(REPUTATION_REGISTRY),
+            abi.encodeCall(
+                IReputationRegistry.getSummary, (agentId, _trustedClients, reputationTag1, reputationTag2)
+            ),
+            3
+        );
+        if (ok) {
+            (uint256 count, uint256 rawValue, uint256 decimals) =
+                abi.decode(result, (uint256, uint256, uint256));
+            int256 value = int256(rawValue);
+            ok = count <= type(uint64).max && decimals <= 18 && value >= type(int128).min
+                && value <= type(int128).max;
+            if (ok) {
+                s.feedbackCount = uint64(count);
+                s.reputationValue = int128(value);
+                s.reputationDecimals = uint8(decimals);
+                if (count != 0) s.reputationBps = _normalizeRating(int128(value), uint8(decimals));
+            }
+        }
+        if (!ok) return (false, address(REPUTATION_REGISTRY), _empty());
         if (address(workHistory) != address(0)) {
             s.historySource = 1;
-            try workHistory.getWorkSummary{gas: SOURCE_GAS_LIMIT}(agentId) returns (
-                uint64 completed, uint64 accepted
-            ) {
-                if (accepted > completed) revert ScoreSourceUnavailable(address(workHistory), agentId);
-                s.completedWork = completed;
-                s.acceptedWork = accepted;
-                if (completed != 0) {
-                    // Acceptance quality multiplied by evidence depth; rejected jobs cannot improve this score.
-                    s.historyBps = (uint256(accepted) * BPS * _min(completed, HISTORY_CONFIDENCE_CAP))
-                        / (uint256(completed) * HISTORY_CONFIDENCE_CAP);
+            (ok, result) = _budgetedRead(
+                address(workHistory), abi.encodeCall(IAgentWorkHistory.getWorkSummary, (agentId)), 2
+            );
+            if (ok) {
+                (uint256 completed, uint256 accepted) = abi.decode(result, (uint256, uint256));
+                ok = completed <= type(uint64).max && accepted <= completed;
+                if (ok) {
+                    s.completedWork = uint64(completed);
+                    s.acceptedWork = uint64(accepted);
+                    if (completed != 0) {
+                        // Acceptance quality multiplied by evidence depth; rejected jobs cannot improve this score.
+                        s.historyBps = (accepted * BPS * _min(completed, HISTORY_CONFIDENCE_CAP))
+                            / (completed * HISTORY_CONFIDENCE_CAP);
+                    }
                 }
-            } catch {
-                revert ScoreSourceUnavailable(address(workHistory), agentId);
             }
+            if (!ok) return (false, address(workHistory), _empty());
         } else {
             // Historical rating evidence is an explicitly labeled fallback, never a claim of accepted jobs.
             s.historyBps =
@@ -490,6 +630,9 @@ contract AgentSkill is Ownable2Step {
         s.total = s.reputationPoints + s.historyPoints + s.endorsementPoints;
         s.policyVersion = policyVersion;
     }
+
+    /// @dev An unavailable candidate carries no partial figures that a client could mistake for a score.
+    function _empty() private pure returns (ScoreBreakdown memory s) {}
 
     /// @dev Clamp negative scores to zero and values over 100 to full scale before multiplying.
     function _normalizeRating(int128 value, uint8 decimals) private pure returns (uint256) {

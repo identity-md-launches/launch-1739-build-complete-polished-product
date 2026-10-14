@@ -25,6 +25,32 @@
   },
   {
     "type": "function",
+    "name": "CALL_GAS_RESERVE",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "DEFAULT_SOURCE_GAS_BUDGET",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "ENDORSEMENT_CAP",
     "inputs": [],
     "outputs": [
@@ -143,6 +169,32 @@
   {
     "type": "function",
     "name": "MAX_SKILL_LENGTH",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MAX_SOURCE_GAS_BUDGET",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "MIN_SOURCE_GAS_BUDGET",
     "inputs": [],
     "outputs": [
       {
@@ -519,6 +571,16 @@
                 "internalType": "uint64"
               }
             ]
+          },
+          {
+            "name": "unavailable",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "unavailableSource",
+            "type": "address",
+            "internalType": "address"
           }
         ]
       },
@@ -764,6 +826,19 @@
   },
   {
     "type": "function",
+    "name": "setSourceGasBudget",
+    "inputs": [
+      {
+        "name": "budget",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "setTrustedClients",
     "inputs": [
       {
@@ -801,6 +876,19 @@
     "outputs": [
       {
         "name": "count",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "sourceGasBudget",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -973,6 +1061,25 @@
   },
   {
     "type": "event",
+    "name": "SourceGasBudgetChanged",
+    "inputs": [
+      {
+        "name": "budget",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      },
+      {
+        "name": "version",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "TrustedClientsChanged",
     "inputs": [
       {
@@ -1013,6 +1120,17 @@
     "type": "error",
     "name": "DuplicateEndorsement",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InsufficientCallGas",
+    "inputs": [
+      {
+        "name": "required",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
   },
   {
     "type": "error",

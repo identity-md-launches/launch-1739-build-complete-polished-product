@@ -124,15 +124,67 @@ contract AgentSkillTest is Test {
         assertEq(app.getAgentSkills(1).length, 31);
         vm.expectRevert(AgentSkill.SkillNotActive.selector);
         app.hideSkill(1, solidityId);
+        // A hidden skill releases its slot: a new label fits, and then the cap applies again.
+        app.registerSkill(1, "too many");
+        vm.expectRevert(AgentSkill.SkillLimitReached.selector);
+        app.registerSkill(1, "solidity");
+        app.hideSkill(1, keccak256("too many"));
         app.registerSkill(1, "solidity");
         vm.stopPrank();
         assertEq(app.skillAgentCount(solidityId), 1);
         (, uint256 catalogCount) = app.getSkills(0, 50);
-        assertEq(catalogCount, 32);
+        assertEq(catalogCount, 33);
         (AgentSkill.Skill[] memory last,) = app.getSkills(30, 50);
-        assertEq(last.length, 2);
-        (last,) = app.getSkills(32, 1);
+        assertEq(last.length, 3);
+        (last,) = app.getSkills(33, 1);
         assertEq(last.length, 0);
+    }
+
+    function test_hiddenSkillsNeverConsumeSlotsPermanently() public {
+        vm.startPrank(alice);
+        app.hideSkill(1, solidityId);
+        for (uint256 i; i < 40; ++i) {
+            bytes32 id = app.registerSkill(1, string.concat("label ", vm.toString(i)));
+            app.hideSkill(1, id);
+        }
+        assertEq(app.getAgentSkills(1).length, 0);
+        app.registerSkill(1, "solidity");
+        app.registerSkill(1, "label 7");
+        vm.stopPrank();
+        AgentSkill.Skill[] memory skills = app.getAgentSkills(1);
+        assertEq(skills.length, 2);
+        assertEq(skills[0].id, solidityId);
+        assertEq(skills[1].name, "label 7");
+        // Reactivation never duplicates the agent in a skill's candidate list.
+        assertEq(app.skillAgentCount(solidityId), 1);
+        assertEq(app.skillAgentCount(keccak256("label 7")), 1);
+    }
+
+    function test_hidingTheMiddleSkillKeepsTheOthersListedWithTheirEndorsements() public {
+        vm.startPrank(alice);
+        bytes32 research = app.registerSkill(1, "research");
+        bytes32 writing = app.registerSkill(1, "writing");
+        vm.stopPrank();
+        vm.startPrank(bob);
+        app.endorseSkill(2, 1, solidityId);
+        app.endorseSkill(2, 1, writing);
+        vm.stopPrank();
+        vm.prank(alice);
+        app.hideSkill(1, research);
+        AgentSkill.Skill[] memory skills = app.getAgentSkills(1);
+        assertEq(skills.length, 2);
+        assertEq(skills[0].id, solidityId);
+        assertEq(skills[0].endorsements, 1);
+        assertEq(skills[1].id, writing);
+        assertEq(skills[1].endorsements, 1);
+        vm.prank(alice);
+        app.hideSkill(1, writing);
+        skills = app.getAgentSkills(1);
+        assertEq(skills.length, 1);
+        assertEq(skills[0].id, solidityId);
+        vm.prank(alice);
+        app.hideSkill(1, solidityId);
+        assertEq(app.getAgentSkills(1).length, 0);
     }
 
     function test_endorsementCountsUniqueAgentsAndWallets() public {
@@ -220,6 +272,8 @@ contract AgentSkillTest is Test {
         reputation.add(1, publisher, 80, 0, "starred", "");
         reputation.add(1, carol, 100, 0, "starred", "");
         reputation.add(1, publisher, 500, 0, "responseTime", "");
+        vm.prank(LAUNCH_OWNER);
+        app.setReputationMetric("starred", "");
         AgentSkill.ScoreBreakdown memory score = app.getScoreBreakdown(1, solidityId);
         assertEq(score.feedbackCount, 1);
         assertEq(score.reputationBps, 8000);
@@ -227,6 +281,106 @@ contract AgentSkillTest is Test {
         score = app.getScoreBreakdown(1, solidityId);
         assertEq(score.feedbackCount, 0);
         assertEq(score.total, 0);
+    }
+
+    function test_defaultMatchAllFilterCountsEveryTrustedRecordAcrossTags() public {
+        // Mirrors live agent 1: five records under one tag and one under another, from one publisher.
+        for (uint256 i; i < 5; ++i) {
+            reputation.add(1, publisher, 50, 0, "quality", "yellow");
+        }
+        reputation.add(1, publisher, 60, 0, "early-adopter", "inactive");
+        reputation.add(1, carol, 100, 0, "quality", "");
+        assertEq(app.reputationTag1(), "");
+        assertEq(app.reputationTag2(), "");
+        AgentSkill.ScoreBreakdown memory score = app.getScoreBreakdown(1, solidityId);
+        assertEq(score.feedbackCount, 6);
+        assertEq(score.reputationValue, 51);
+        assertEq(score.reputationBps, 5100);
+        assertGt(score.total, 0);
+        vm.prank(LAUNCH_OWNER);
+        app.setReputationMetric("quality", "");
+        assertEq(app.getScoreBreakdown(1, solidityId).feedbackCount, 5);
+        vm.prank(LAUNCH_OWNER);
+        app.setReputationMetric("early-adopter", "");
+        assertEq(app.getScoreBreakdown(1, solidityId).feedbackCount, 1);
+        // The owner can return to the registry's match-all filter at any time.
+        vm.prank(LAUNCH_OWNER);
+        app.setReputationMetric("", "");
+        assertEq(app.getScoreBreakdown(1, solidityId).feedbackCount, 6);
+        assertEq(app.policyVersion(), 4);
+    }
+
+    function test_sourceGasBudgetIsOwnerAdjustableWithinBounds() public {
+        assertEq(app.sourceGasBudget(), 5_000_000);
+        vm.prank(LAUNCH_OWNER);
+        vm.expectRevert(AgentSkill.InvalidPolicy.selector);
+        app.setSourceGasBudget(999_999);
+        vm.prank(LAUNCH_OWNER);
+        vm.expectRevert(AgentSkill.InvalidPolicy.selector);
+        app.setSourceGasBudget(10_000_001);
+        vm.prank(LAUNCH_OWNER);
+        vm.expectEmit(address(app));
+        emit AgentSkill.SourceGasBudgetChanged(10_000_000, 2);
+        app.setSourceGasBudget(10_000_000);
+        assertEq(app.sourceGasBudget(), 10_000_000);
+        vm.prank(LAUNCH_OWNER);
+        app.setSourceGasBudget(1_000_000);
+        assertEq(app.sourceGasBudget(), 1_000_000);
+        assertEq(app.policyVersion(), 3);
+        assertEq(app.getScoreBreakdown(1, solidityId).policyVersion, 3);
+    }
+
+    function test_callerWithoutGasForOneBudgetedReadGetsAnExplicitError() public {
+        uint256 budget = app.sourceGasBudget();
+        uint256 required = budget + budget / 63 + app.CALL_GAS_RESERVE();
+        vm.expectRevert(abi.encodeWithSelector(AgentSkill.InsufficientCallGas.selector, required));
+        app.getScoreBreakdown{gas: required - 1}(1, solidityId);
+        // With a work adapter, a candidate needs two budgeted reads.
+        vm.prank(LAUNCH_OWNER);
+        app.setWorkHistory(address(work));
+        vm.expectRevert(abi.encodeWithSelector(AgentSkill.InsufficientCallGas.selector, 2 * required));
+        app.getTopAgents{gas: 2 * required - 1}(solidityId, 0, 50, 20);
+    }
+
+    function test_malformedSourceAnswersAreReportedNotDecoded() public {
+        vm.mockCall(
+            REPUTATION,
+            abi.encodeWithSelector(MockReputationRegistry.getSummary.selector),
+            abi.encode(uint64(20))
+        );
+        vm.expectRevert(abi.encodeWithSelector(AgentSkill.ScoreSourceUnavailable.selector, REPUTATION, 1));
+        app.getScoreBreakdown(1, solidityId);
+        vm.mockCall(
+            REPUTATION,
+            abi.encodeWithSelector(MockReputationRegistry.getSummary.selector),
+            abi.encode(uint256(type(uint64).max) + 1, uint256(90), uint256(0))
+        );
+        vm.expectRevert(abi.encodeWithSelector(AgentSkill.ScoreSourceUnavailable.selector, REPUTATION, 1));
+        app.getScoreBreakdown(1, solidityId);
+        vm.mockCall(
+            REPUTATION,
+            abi.encodeWithSelector(MockReputationRegistry.getSummary.selector),
+            abi.encode(uint256(20), uint256(type(uint128).max), uint256(0))
+        );
+        vm.expectRevert(abi.encodeWithSelector(AgentSkill.ScoreSourceUnavailable.selector, REPUTATION, 1));
+        app.getScoreBreakdown(1, solidityId);
+        _mockSummary(20, 90, 0);
+        vm.prank(LAUNCH_OWNER);
+        app.setWorkHistory(address(work));
+        vm.mockCall(
+            address(work),
+            abi.encodeWithSelector(MockWorkHistory.getWorkSummary.selector),
+            abi.encode(uint64(3))
+        );
+        vm.expectRevert(abi.encodeWithSelector(AgentSkill.ScoreSourceUnavailable.selector, address(work), 1));
+        app.getScoreBreakdown(1, solidityId);
+        vm.mockCall(
+            address(work),
+            abi.encodeWithSelector(MockWorkHistory.getWorkSummary.selector),
+            abi.encode(uint256(type(uint64).max) + 1, uint256(1))
+        );
+        vm.expectRevert(abi.encodeWithSelector(AgentSkill.ScoreSourceUnavailable.selector, address(work), 1));
+        app.getScoreBreakdown(1, solidityId);
     }
 
     function test_secondaryTagAndPolicyVersionAreUsed() public {
@@ -345,6 +499,11 @@ contract AgentSkillTest is Test {
         app.setTrustedClients(clients);
         vm.prank(LAUNCH_OWNER);
         vm.expectRevert(AgentSkill.InvalidPolicy.selector);
+        app.setReputationMetric(string(new bytes(49)), "");
+        vm.prank(LAUNCH_OWNER);
+        vm.expectRevert(AgentSkill.InvalidPolicy.selector);
+        app.setReputationMetric("quality", string(new bytes(49)));
+        vm.prank(LAUNCH_OWNER);
         app.setReputationMetric("", "");
         vm.prank(LAUNCH_OWNER);
         vm.expectRevert(AgentSkill.InvalidPolicy.selector);
@@ -383,6 +542,8 @@ contract AgentSkillTest is Test {
         app.setReputationMetric("quality", "");
         vm.expectRevert(errorData);
         app.setWorkHistory(address(work));
+        vm.expectRevert(errorData);
+        app.setSourceGasBudget(5_000_000);
         vm.expectRevert(errorData);
         app.clearWorkHistory();
         vm.expectRevert(errorData);

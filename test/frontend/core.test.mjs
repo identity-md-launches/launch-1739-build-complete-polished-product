@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { normalizeSkill, parseAgentId, formatScore, mergeRanked, loadLeaderboard, safeHttpUrl, readableError } from "../../web/core.js";
+import { normalizeSkill, parseAgentId, formatScore, mergeRanked, collectUnavailable, loadLeaderboard, safeHttpUrl, readableError } from "../../web/core.js";
 import { Interface } from "../../web/vendor/ethers.min.js";
 
-const candidate = (agentId, total) => ({ agentId: BigInt(agentId), score: { total: BigInt(total) } });
+const candidate = (agentId, total) => ({ agentId: BigInt(agentId), score: { total: BigInt(total) }, unavailable: false, unavailableSource: "0x0000000000000000000000000000000000000000" });
+const REPUTATION = "0x8004BAa17C55a88189AE136b182e5fdA19dE9b63";
+const unscored = agentId => ({ agentId: BigInt(agentId), score: { total: 0n }, unavailable: true, unavailableSource: REPUTATION });
 
 test("skill normalization matches canonical Solidity labels and rejects unsupported input", () => {
   assert.equal(normalizeSkill("  Security   AUDIT "), "security audit");
@@ -24,6 +26,29 @@ test("agent IDs preserve full uint256 precision, including token zero", () => {
 test("global ranking merges every page, breaks ties numerically, and deduplicates", () => {
   const results = mergeRanked([[candidate(50, 6000), candidate(10, 0)], [candidate(500, 9000), candidate(2, 6000)], [candidate(50, 6000)]], 3);
   assert.deepEqual(results.map(x => x.agentId), [500n, 2n, 50n]);
+});
+
+test("unscored candidates never enter the ranking and are reported with their failed source", () => {
+  const results = mergeRanked([[candidate(1, 100), unscored(2)], [unscored(3), candidate(4, 50)]], 3);
+  assert.deepEqual(results.map(x => x.agentId), [1n, 4n]);
+  const missing = collectUnavailable([[candidate(1, 100), unscored(9)], [unscored(3), unscored(9)]]);
+  assert.deepEqual(missing, [{ agentId: 3n, source: REPUTATION }, { agentId: 9n, source: REPUTATION }]);
+});
+
+test("leaderboard keeps unscored agents out of the top list, lists them once, and resumes early-stopped pages", async () => {
+  const calls = [];
+  const contract = { async getTopAgents(_skill, offset) {
+    calls.push(offset);
+    // The first page stopped early at candidate 7 because the call ran out of gas for the next read.
+    if (offset === 0n) return [[candidate(1, 100), unscored(5)], 7n, 30n];
+    if (offset === 7n) return [[candidate(20, 9000), unscored(5), unscored(8)], 27n, 30n];
+    return [[candidate(28, 500)], 30n, 30n];
+  } };
+  const result = await loadLeaderboard(contract, "skill-hash", 77);
+  assert.deepEqual(calls, [0n, 7n, 27n]);
+  assert.deepEqual(result.ranked.map(x => x.agentId), [20n, 28n, 1n]);
+  assert.deepEqual(result.unavailable.map(x => x.agentId), [5n, 8n]);
+  assert.equal(result.totalCandidates, 30n);
 });
 
 test("leaderboard reads all candidates at the same block and promotes later-page winners", async () => {
@@ -71,6 +96,8 @@ test("real ABI custom errors decode into actionable messages and vendor supports
   const iface = new Interface(abi);
   const error = iface.encodeErrorResult("DuplicateEndorsement");
   assert.match(readableError({ data: error }, iface), /already endorsed/);
+  assert.match(readableError({ data: iface.encodeErrorResult("InsufficientCallGas", [5_139_365n]) }, iface), /gas/);
+  assert.match(readableError({ data: iface.encodeErrorResult("ScoreSourceUnavailable", [REPUTATION, 1n]) }, iface), /No score has been substituted/);
   assert.match(readableError({ code: 4001 }), /cancelled/);
   assert.match(readableError({ code: "NETWORK_ERROR" }), /connection/);
   const call = iface.encodeFunctionData("registerSkill", [1n, "solidity"]);
