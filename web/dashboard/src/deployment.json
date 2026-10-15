@@ -1,0 +1,29 @@
+{
+  "chainId": 1,
+  "contractAddress": "0xabec9774d66c640b64238dbd69758d31d10d54b1",
+  "deploymentBlock": 26191312,
+  "sourceCommit": "cae6d4dcf66b14da9c8dadb25dac59f2697f3e92",
+  "abiHash": "b496e524ca306f337d976085c9c9b4980ff142932f164ef0c2bcea58d0372ed0",
+  "runtimeCodeHash": "0xe271cd477eb394ac1c6709ed7cf49ea40a2b5514f0d50dd1f3ae8db1a2e7de9a",
+  "rpcUrls": [
+    "https://ethereum-rpc.publicnode.com",
+    "https://eth.drpc.org"
+  ],
+  "explorer": "https://etherscan.io",
+  "walletAddChain": {
+    "chainId": "0x1",
+    "chainName": "Ethereum",
+    "rpcUrls": [
+      "https://ethereum-rpc.publicnode.com",
+      "https://eth.drpc.org"
+    ],
+    "nativeCurrency": {
+      "name": "Ether",
+      "symbol": "ETH",
+      "decimals": 18
+    },
+    "blockExplorerUrls": [
+      "https://etherscan.io"
+    ]
+  }
+}

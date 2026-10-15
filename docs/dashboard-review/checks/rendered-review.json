@@ -1,0 +1,50 @@
+{
+  "date": "2026-10-15T09:17:49.514Z",
+  "widths": [
+    {
+      "width": 320,
+      "overflow": false
+    },
+    {
+      "width": 390,
+      "overflow": false
+    },
+    {
+      "width": 768,
+      "overflow": false
+    },
+    {
+      "width": 1024,
+      "overflow": false
+    },
+    {
+      "width": 1440,
+      "overflow": false
+    }
+  ],
+  "axe": [
+    {
+      "route": "discover",
+      "violations": []
+    },
+    {
+      "route": "agent",
+      "violations": []
+    },
+    {
+      "route": "manage",
+      "violations": []
+    },
+    {
+      "route": "about",
+      "violations": []
+    }
+  ],
+  "errors": [],
+  "missing": [],
+  "liveSnapshot": "Snapshot at block 26,196,964\n(opens in a new tab)",
+  "policy": "On-chain connection\n\nEthereum mainnet · Chain ID 1\n\nAgentSkill contract\n0xAbeC9774D66C640b64238dbD69758D31d10d54B1\n(opens in a new tab)\nDeployed code verified\nRanking policy\nAwaiting configuration\nSnapshot block\n26,196,964\nFeedback filter\nAll primary tags · All secondary tags\nHistory source\nRating history\nTrusted publishers\n\nThe contract owner has not configured publishers. Scores remain unavailable until this is done.\n\nPolicy owner\n0x7F4b7860bA9957128c5Ce416e94784cA98b5C976\n(opens in a new tab)\nRefresh connection",
+  "textEnlargement": "Root text size doubled (32px), no horizontal overflow at 390 and 1280; not native browser zoom.",
+  "reducedMotion": 0,
+  "fontLoaded": true
+}

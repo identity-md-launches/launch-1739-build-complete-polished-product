@@ -1,0 +1,114 @@
+[
+  {
+    "name": "Global top 20 includes later-page winners, numeric tie break, unavailable agents, same-block pagination",
+    "passed": true
+  },
+  {
+    "name": "Search canonicalizes labels and updates shareable hash route",
+    "passed": true
+  },
+  {
+    "name": "Invalid search gives inline error and focuses input",
+    "passed": true
+  },
+  {
+    "name": "Skill directory expands and collapses",
+    "passed": true
+  },
+  {
+    "name": "Profile loads skills, scores, policy version and feedback semantics",
+    "passed": true
+  },
+  {
+    "name": "Endorsement explains permanence, gates connection, Escape restores focus",
+    "passed": true
+  },
+  {
+    "name": "Unregistered identity shows a useful error, never a fabricated profile",
+    "passed": true
+  },
+  {
+    "name": "Populated results reflow at 320, 390, 768, 1024, 1440; axe reports zero violations",
+    "passed": true
+  },
+  {
+    "name": "No JavaScript errors in populated search/profile flows",
+    "passed": true
+  },
+  {
+    "name": "Keyboard skip link preserves the route; keyboard-only profile lookup completes",
+    "passed": true
+  },
+  {
+    "name": "Nested wallet and endorsement dialogs have unique names and keep keyboard focus trapped",
+    "passed": true
+  },
+  {
+    "name": "Unconfigured publisher policy has an honest non-scored state",
+    "passed": true
+  },
+  {
+    "name": "Empty result offers working add-skill navigation",
+    "passed": true
+  },
+  {
+    "name": "Offline read failure recovers with retry",
+    "passed": true
+  },
+  {
+    "name": "Secondary pinned RPC handles primary RPC failure",
+    "passed": true
+  },
+  {
+    "name": "Failed later page does not present partial results as global rankings",
+    "passed": true
+  },
+  {
+    "name": "Unexpected runtime bytecode blocks contract reads",
+    "passed": true
+  },
+  {
+    "name": "Wrong RPC chain blocks contract reads",
+    "passed": true
+  },
+  {
+    "name": "Named EIP-6963 wallet connects, wrong chain switches and 4902 adds pinned Ethereum",
+    "passed": true
+  },
+  {
+    "name": "Owned identity adds a canonical skill through simulated and confirmed wallet transaction",
+    "passed": true
+  },
+  {
+    "name": "Confirmed registration refreshes the profile",
+    "passed": true
+  },
+  {
+    "name": "Hide skill confirms reversible effect and refreshes after receipt",
+    "passed": true
+  },
+  {
+    "name": "Endorsement sends the correct endorser, target identity, skill and destination",
+    "passed": true
+  },
+  {
+    "name": "Wallet disconnect returns the header to the connect control",
+    "passed": true
+  },
+  {
+    "name": "A reverted receipt never reports success or mutates the visible skills",
+    "passed": true
+  },
+  {
+    "name": "Wallet rejection restores editable form without recording a transaction",
+    "passed": true
+  },
+  {
+    "name": "Duplicate endorsement rejection stays visible inside the modal before wallet signing",
+    "passed": true
+  },
+  {
+    "name": "Phone picker offers all four deep links and Coinbase Smart Wallet; accessible dialog has no axe violations",
+    "passed": true
+  }
+]
