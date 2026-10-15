@@ -51,6 +51,8 @@ Body line-height is 1.55. The page heading uses 1.2, weight 600, and −.035em t
 
 Inputs remain at least 16px at the default root size. Scores, IDs, changing counts, and addresses use tabular numbers. Critical addresses and agent IDs wrap without clipping. The header’s short wallet address expands to the complete checksummed address in the wallet dialog. No content-wide uppercase transformation, tracked kicker labels, or monospace prose is used.
 
+Results headings and empty-state descriptions use `overflow-wrap: anywhere` to retain complete skill names, including unbroken 48-character searches. The results heading’s flex child has `min-width: 0`, leaving room for Refresh. The score guide retains a literal space before its desktop line break so its words stay separated when that break is hidden on phones.
+
 ## Layout
 
 `app-shell` is a two-column desktop workspace: a 228px sidebar and a flexible content area. Main content is at most 1280px wide including padding, with 44px inline padding and 40px top padding. The topbar is at least 88px high. Desktop navigation, header, content, and footer follow consistent edges.
@@ -97,6 +99,8 @@ The shared radius is 12px; large result/guide surfaces use 18px. Buttons and inp
 | `Icon`, `EmptyArt` | `src/icons.tsx` | Local, decorative SVGs; 1.7px current-color icon strokes; no icon font or remote image service |
 
 `.button.primary` is the main action; `.button` is a secondary action; `.text-button` is a low-emphasis action. Rest, hover, pressed, disabled, and keyboard-focus states are explicit. Main targets are at least 44px high. Skill suggestions are 40px on phones and are separated from adjacent controls; inline evidence links use normal text-link spacing.
+
+The management page uses the task headings “Manage skills” and “How to add skills”. Its connection panel leads directly with the identity-owner wallet explanation and Connect wallet button; the agent-ID and Ethereum network-fee guidance remain adjacent to the workflow.
 
 Transitions name only the changing properties and last 120ms. Pressed controls scale to .96 only when the visitor allows motion. There are no entrance animations, autoplay, parallax, or continuous decorative effects. Focus uses a 2px outline offset by 4px, with forced-color support.
 

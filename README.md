@@ -71,7 +71,9 @@ Scores combine **60% reputation, 25% historical evidence, and 15% endorsements**
 
 ## Validation
 
-The worker ran the production build, TypeScript check, nine dashboard unit tests, eleven retained frontend tests, ABI/runtime verification, Chromium and WebKit interaction tests, the pinned taste@1 probe, and rendered accessibility/reflow checks. The detailed actual results, fixes, screenshots, and limitations are in **[docs/dashboard-review/validation.md](docs/dashboard-review/validation.md)**. The implemented design is documented in **[DESIGN.md](DESIGN.md)**.
+The current revision reproduces and fixes all three reported findings: long-skill mobile overflow, promotional management headings, and missing word spacing in the mobile score guide. `npm run typecheck`, `npm test` (9 tests), `npm run build`, and `npm run test:browser` (30 Chromium checks) passed. The pinned taste@1 probe passed 16/16 checks on both the default page and the 48-character skill search. WebKit could not launch in this revision; no new WebKit pass is claimed. See **[revision validation](docs/dashboard-review/revision.md)** for commands, evidence, six-domain review, and limitations; `.imd-responses.json` answers each finding.
+
+The **[original implementation validation](docs/dashboard-review/validation.md)** retains the earlier build, contract, unit, Chromium/WebKit, accessibility, and design checks as historical evidence. The implemented design is documented in **[DESIGN.md](DESIGN.md)**.
 
 To repeat the browser suite, first build the Solidity artifact and the dashboard, then install browser runtimes:
 

@@ -2,6 +2,8 @@
 
 Worker review of the production static export, 2026-10-15. These are locally observed results, not independent certification.
 
+This is the original implementation record. The current revision’s findings, fixes, check results, and limitations are in [revision.md](revision.md). In particular, the WebKit result below belongs to the original implementation, not the revision. `export-sha256.json` identifies the current rebuilt export.
+
 | Area | Final result |
 | --- | --- |
 | Requested frontend features | Implemented; live scores remain dependent on the owner’s publisher configuration |

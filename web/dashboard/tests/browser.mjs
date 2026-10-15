@@ -128,6 +128,40 @@ async function setup(options={}) {
 async function connect(page){await page.getByRole('button',{name:'Connect',exact:true}).click();await page.getByRole('button',{name:'Test wallet',exact:false}).click();await page.getByRole('dialog').waitFor({state:'hidden'});}
 async function waitResults(page){await page.locator('.ranking-list').waitFor();}
 try {
+ for(const empty of [true,false]) {
+  const {ctx,page,state}=await setup({empty});
+  const longSkill='s'.repeat(48);
+  await page.getByLabel('What skill are you looking for?').fill(longSkill);
+  await page.getByRole('button',{name:'Search',exact:true}).click();
+  if(empty)await page.getByRole('heading',{name:'Room for your expertise'}).waitFor();else await waitResults(page);
+  await page.waitForFunction(()=>document.querySelector('.results-section')?.getAttribute('aria-busy')==='false');
+  await page.evaluate(()=>document.fonts.ready);
+  for(const width of [320,390,1440]) {
+   await page.setViewportSize({width,height:844});
+   const layout=await page.evaluate(()=>{
+    const card=document.querySelector('.results-section').getBoundingClientRect();
+    const heading=document.querySelector('#results-heading');
+    const refresh=document.querySelector('[aria-label="Refresh agent rankings"]').getBoundingClientRect();
+    const textNodes=[heading,...document.querySelectorAll('.empty-state p,.ranking-row .agent-name .caption')];
+    const textInsideCard=textNodes.every(node=>{
+     const range=document.createRange();range.selectNodeContents(node);
+     return [...range.getClientRects()].every(rect=>rect.left>=card.left && rect.right<=card.right);
+    });
+    return {pageWidth:document.documentElement.scrollWidth,heading:heading.textContent,description:document.querySelector('.empty-state p')?.textContent,textInsideCard,refreshInsideCard:refresh.left>=card.left && refresh.right<=card.right,headingBeforeRefresh:heading.getBoundingClientRect().right<=refresh.left};
+   });
+   assert.equal(layout.pageWidth,width,`${empty?'empty':'populated'} long-skill results overflow at ${width}px`);
+   assert.equal(layout.heading.toLowerCase(),`${longSkill} agents`);
+   if(empty)assert.ok(layout.description.includes(longSkill));
+   assert.ok(layout.textInsideCard,`Full skill text must wrap inside the card at ${width}px`);
+   assert.ok(layout.refreshInsideCard && layout.headingBeforeRefresh,`Refresh must remain visible beside the heading at ${width}px`);
+  }
+  const reads=state.calls.filter(c=>c.method==='eth_blockNumber').length;
+  await page.getByRole('button',{name:'Refresh agent rankings'}).click();
+  await page.waitForFunction(()=>document.querySelector('.results-section')?.getAttribute('aria-busy')==='false');
+  assert.ok(state.calls.filter(c=>c.method==='eth_blockNumber').length>reads);
+  pass(`48-character skill wraps without clipping in ${empty?'empty':'populated'} results at 320, 390, 1440; Refresh stays usable`);
+  await ctx.close();
+ }
  {
   const {ctx,page,state,jsErrors}=await setup();await waitResults(page);
   assert.deepEqual(await page.locator('.ranking-row .agent-name').allTextContents().then(a=>a.slice(0,2)),['Agent #40Solidity','Agent #41Solidity']);
@@ -164,7 +198,7 @@ try {
   const {ctx,page}=await setup({configured:false});await page.getByRole('heading',{name:'Rankings are getting ready'}).waitFor();assert.equal(await page.locator('.ranking-row').count(),0);pass('Unconfigured publisher policy has an honest non-scored state');await ctx.close();
  }
  {
-  const {ctx,page}=await setup({empty:true});await page.getByRole('heading',{name:'Room for your expertise'}).waitFor();await page.getByRole('link',{name:'Add a skill',exact:true}).click();await page.getByRole('heading',{name:'Put your skills on the map.'}).waitFor();pass('Empty result offers working add-skill navigation');await ctx.close();
+  const {ctx,page}=await setup({empty:true});await page.getByRole('heading',{name:'Room for your expertise'}).waitFor();await page.getByRole('link',{name:'Add a skill',exact:true}).click();await page.getByRole('heading',{name:'Manage skills'}).waitFor();pass('Empty result offers working add-skill navigation');await ctx.close();
  }
  {
   const {ctx,page,state}=await setup({offline:true});await page.getByRole('heading',{name:'Can’t reach Ethereum'}).waitFor();state.offline=false;await page.getByRole('button',{name:'Retry connection'}).click();await waitResults(page);pass('Offline read failure recovers with retry');await ctx.close();
